@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>SEMS CYBERATTACKS DETECTOR</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="title">SEMS CYBERATTACKS DETECTOR</div>
+    <div class="total">Total Attacks: <span id="totalCounter">0</span></div>
+  </header>
+
+  <main>
+    <div id="map"></div>
+
+    <aside class="sidebar">
+      <div>
+        <div class="section-title">Active Attacks</div>
+        <div class="muted">Live unique attacking IPs (updates in real time)</div>
+      </div>
+      <table id="attacksTable" style="margin-top:10px">
+        <thead>
+          <tr><th>IP</th><th>Location</th><th>Count</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </aside>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/elfalem/Leaflet.curve/leaflet.curve.js"></script>
+
+  <script>
+      // map setup
+    const map = L.map('map', { worldCopyJump:true, zoomControl:true }).setView([18,0], 2);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution:'', minZoom:1, maxZoom:8 }).addTo(map);
+
+    const socket = io(); // same origin
+
+    // UI elements
+    const totalCounter = document.getElementById('totalCounter');
+    const tbody = document.querySelector('#attacksTable tbody');
+
+    // in-memory for frontend: ip -> row element & map layer
+    const frontMap = new Map(); // ip -> { rowEl, marker, arc }
+
+    // helpers to create table row
+    function addRow(entry) {
+      const tr = document.createElement('tr');
+      tr.dataset.ip = entry.ip;
+      tr.innerHTML = `<td class="ip">${entry.ip}</td>
+                      <td>${entry.city ? entry.city + ', ' + entry.country : entry.country}</td>
+                      <td class="count">${entry.count}</td>`;
+      tbody.prepend(tr); // newest on top
+      return tr;
+    }
+    function updateRowCount(ip, count) {
+      const rec = frontMap.get(ip);
+      if (!rec) return;
+      const td = rec.rowEl.querySelector('.count');
+      if (td) td.textContent = count;
+    }
+    function removeRow(ip) {
+      const rec = frontMap.get(ip);
+      if (!rec) return;
+      if (rec.rowEl && rec.rowEl.parentNode) rec.rowEl.parentNode.removeChild(rec.rowEl);
+      if (rec.marker) map.removeLayer(rec.marker);
+      if (rec.arc) map.removeLayer(rec.arc);
+      // remove pulse elements (if any)
+      document.querySelectorAll(`.pulse[data-ip="${ip}"]`).forEach(el => el.remove());
+      frontMap.delete(ip);
+    }
+
+    // draw a curved arc and a pulse marker
+    function showOnMap(entry) {
+      const src = [entry.lat, entry.lon];
+      // small marker
+      const marker = L.circleMarker(src, {
+        radius: 6, color: '#00f7ff', fillColor: '#00f7ff', fillOpacity: 0.9, weight: 0.8
+      }).addTo(map);
+
+      // for visual drama: draw a tiny "arc" to a notional center (or small offset)
+      const control = [ entry.lat + (Math.random()-0.5)*8, entry.lon + (Math.random()-0.5)*8 ];
+      const curve = L.curve(['M', src, 'Q', control, src], { color:'#ffd86b', weight: Math.min(4, 1+entry.count/2), opacity: 0.9 }).addTo(map);
+
+      // add DOM pulse placed at marker position
+      const pulse = document.createElement('div');
+      pulse.className = 'pulse';
+      pulse.dataset.ip = entry.ip;
+      document.body.appendChild(pulse);
+      const p = map.latLngToContainerPoint(src);
+      pulse.style.left = `${p.x}px`; pulse.style.top = `${p.y}px`;
+      setTimeout(()=> pulse.remove(), 1000);
+
+      return { marker, arc: curve };
+    }
+
+    // socket handlers
+    socket.on('connect', () => console.log('connected to backend'));
+    socket.on('hydrate', (msg) => {
+      // populate initial tracked list
+      (msg.tracked || []).forEach(e => {
+        totalCounter.textContent = totalCounter.textContent || '0';
+        const row = addRow(e);
+        const mapItems = showOnMap(e);
+        frontMap.set(e.ip, { rowEl: row, marker: mapItems.marker, arc: mapItems.arc });
+      });
+    });
+    socket.on('total', (msg) => {
+      totalCounter.textContent = msg.totalAttacks || '0';
+    });
+
+    socket.on('attack', (entry) => {
+      // entry: { ip, count, lat, lon, city, country }
+      const row = addRow(entry);
+      const mapItems = showOnMap(entry);
+      frontMap.set(entry.ip, { rowEl: row, marker: mapItems.marker, arc: mapItems.arc });
+    });
+
+    socket.on('updateCount', (entry) => {
+      // entry: { ip, count, lat, lon, city, country }
+      // update table count
+      updateRowCount(entry.ip, entry.count);
+
+      // animate marker briefly (pulse)
+      const rec = frontMap.get(entry.ip);
+      if (rec && rec.marker) {
+        // increase marker radius momentarily
+        rec.marker.setStyle({ radius: Math.min(12, 6 + entry.count) });
+        setTimeout(() => rec.marker.setStyle({ radius: 6 }), 700);
+      } else {
+        // if we get an update for an IP we don't have, create it
+        const row = addRow(entry);
+        const mapItems = showOnMap(entry);
+        frontMap.set(entry.ip, { rowEl: row, marker: mapItems.marker, arc: mapItems.arc });
+      }
+    });
+
+    socket.on('remove', ({ ip }) => {
+      removeRow(ip);
+    });
+
+    // keep pulses in right place when map moves
+    map.on('move zoom', () => {
+      frontMap.forEach((rec, ip) => {
+        if (!rec || !rec.marker) return;
+        const latlng = rec.marker.getLatLng();
+        document.querySelectorAll(`.pulse[data-ip="${ip}"]`).forEach(p => p.remove());
+      });
+    });
+  </script>
+</body>
+</html>
