@@ -8,3 +8,5 @@ CyberEye is a live cyber attack detection and visualization tool. It uses geoloc
 - **Backend API** — Built with Node.js & Express for handling detection logic.
 - **Frontend Dashboard** — Live visualizations for quick decision-making.
 - **Extensible Design** — Easily integrate with other tools or datasets.
+
+![CyberEye Demo](assets/demo.gif)
